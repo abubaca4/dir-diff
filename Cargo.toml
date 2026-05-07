@@ -1,6 +1,6 @@
 [package]
-name = "dir-patch"
-version = "0.2.0"
+name = "dir-diff"
+version = "0.3.0"
 edition = "2024"
 
 [profile.release]
@@ -17,6 +17,3 @@ rayon = "1.10"
 blake3 = "1.5"
 colored = "2.1"
 mimalloc = "0.1"
-
-[build-dependencies]
-winres = "0.1"
