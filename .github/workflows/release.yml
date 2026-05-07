@@ -47,18 +47,18 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          Compress-Archive -Path myutil.exe -DestinationPath ${{ github.workspace }}/myutil-${{ matrix.target }}-${{ matrix.cpu }}.zip
+          Compress-Archive -Path dir-patch.exe -DestinationPath ${{ github.workspace }}/dir-patch-${{ matrix.target }}-${{ matrix.cpu }}.zip
         shell: pwsh
 
       - name: Package (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ${{ github.workspace }}/myutil-${{ matrix.target }}-${{ matrix.cpu }}.tar.gz myutil
+          tar czf ${{ github.workspace }}/dir-patch-${{ matrix.target }}-${{ matrix.cpu }}.tar.gz dir-patch
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            myutil-*-${{ matrix.cpu }}.zip
-            myutil-*-${{ matrix.cpu }}.tar.gz
+            dir-patch-*-${{ matrix.cpu }}.zip
+            dir-patch-*-${{ matrix.cpu }}.tar.gz
