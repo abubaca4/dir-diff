@@ -1,0 +1,64 @@
+name: Build and attach release assets
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            cpu: baseline
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            cpu: x86-64-v3
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            cpu: baseline
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            cpu: x86-64-v3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl-tools (for Linux MUSL)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build release binary
+        env:
+          RUSTFLAGS: "-C target-cpu=${{ matrix.cpu == 'x86-64-v3' && 'x86-64-v3' || 'x86-64' }}"
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path myutil.exe -DestinationPath ${{ github.workspace }}/myutil-${{ matrix.target }}-${{ matrix.cpu }}.zip
+        shell: pwsh
+
+      - name: Package (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ${{ github.workspace }}/myutil-${{ matrix.target }}-${{ matrix.cpu }}.tar.gz myutil
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            myutil-*-${{ matrix.cpu }}.zip
+            myutil-*-${{ matrix.cpu }}.tar.gz
