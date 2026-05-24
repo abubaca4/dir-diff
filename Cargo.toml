@@ -1,19 +1,20 @@
 [package]
 name = "dir-diff"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 
 [profile.release]
 strip = true
 lto = true
+codegen-units = 1
 panic = 'abort'
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
-walkdir = "2.5"
+clap = { version = "4", features = ["derive"] }
+walkdir = "2"
 pathdiff = "0.2"
 image = "0.25"
-rayon = "1.10"
-blake3 = "1.5"
-colored = "2.1"
+rayon = "1"
+blake3 = "1"
+colored = "3"
 mimalloc = "0.1"
