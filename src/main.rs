@@ -40,6 +40,11 @@ struct Args {
     /// Подробный вывод удалённых файлов
     #[arg(long = "del", short = 'd')]
     del: bool,
+
+    /// Целевой порог схожести SSIM (0.0 - 1.0) для изображений (например, 0.85).
+    /// Если не задан, требуется полное совпадение.
+    #[arg(long = "ssim")]
+    ssim: Option<f64>,
 }
 
 /// Сканирует папку и возвращает HashMap, где ключ - относительный путь, значение - абсолютный.
@@ -61,7 +66,7 @@ fn scan_directory(dir: &Path) -> HashMap<PathBuf, PathBuf> {
 fn main() {
     let args = Args::parse();
 
-    // 1. Оптимизация: Парралельное сканирование двух папок
+    // 1. Оптимизация: Параллельное сканирование двух папок
     let (files1, files2) =
         rayon::join(|| scan_directory(&args.dir1), || scan_directory(&args.dir2));
 
@@ -88,11 +93,13 @@ fn main() {
         }
     }
 
+    let ssim_threshold = args.ssim;
+
     // 3. Оптимизация: Параллельное сравнение файлов (нагружает все ядра процессора)
     let modified: Vec<PathBuf> = candidate_modified
         .into_par_iter()
         .filter_map(|(rel_path, abs1, abs2)| {
-            if !compare::are_files_identical(&abs1, &abs2) {
+            if !compare::are_files_identical(&abs1, &abs2, ssim_threshold) {
                 Some(rel_path)
             } else {
                 None

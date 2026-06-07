@@ -1,9 +1,10 @@
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
+use image_compare::Algorithm;
 
 /// Единая точка входа для сравнения двух файлов.
-pub fn are_files_identical(path1: &Path, path2: &Path) -> bool {
+pub fn are_files_identical(path1: &Path, path2: &Path, ssim_threshold: Option<f64>) -> bool {
     let ext = path1
         .extension()
         .and_then(|e| e.to_str())
@@ -15,26 +16,50 @@ pub fn are_files_identical(path1: &Path, path2: &Path) -> bool {
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff"
     );
 
-    // Специфичная процедура для изображений
     if is_image {
-        match compare_images(path1, path2) {
+        // Оптимизация: если файлы совпадают побайтово на диске (одинаковый размер и хэш),
+        // значит и изображения 100% идентичны. Это экономит время на декодирование и вычисление SSIM.
+        if compare_base(path1, path2) {
+            return true;
+        }
+
+        match compare_images(path1, path2, ssim_threshold) {
             Ok(is_identical) => return is_identical,
             Err(_) => {
-                // Фолбек на базовую процедуру при ошибке декодирования (например, битый файл)
+                // В случае ошибки декодирования (битый файл) считаем их разными
+                return false;
             }
         }
     }
 
-    // Базовая процедура
+    // Базовая процедура для не-изображений
     compare_base(path1, path2)
 }
 
-/// Сравнение изображений по пикселям (RGBA буферы)
-fn compare_images(path1: &Path, path2: &Path) -> Result<bool, image::ImageError> {
-    let img1 = image::open(path1)?.into_rgba8();
-    let img2 = image::open(path2)?.into_rgba8();
+/// Сравнение изображений (по SSIM или полное попиксельное)
+fn compare_images(path1: &Path, path2: &Path, ssim_threshold: Option<f64>) -> Result<bool, image::ImageError> {
+    if let Some(threshold) = ssim_threshold {
+        // SSIM сравнение (RGB8 используется для лучшего учета цветного текста/деталей)
+        let img1 = image::open(path1)?.into_rgb8();
+        let img2 = image::open(path2)?.into_rgb8();
 
-    Ok(img1 == img2)
+        // SSIM требует одинакового разрешения
+        if img1.dimensions() != img2.dimensions() {
+            return Ok(false);
+        }
+
+        match image_compare::rgb_similarity_structure(&Algorithm::MSSIMSimple, &img1, &img2) {
+            // Если индекс сходства больше либо равен целевому порогу, считаем их одинаковыми
+            Ok(result) => Ok(result.score >= threshold),
+            Err(_) => Ok(false),
+        }
+    } else {
+        // Старое поведение: точное сравнение RGBA буферов
+        let img1 = image::open(path1)?.into_rgba8();
+        let img2 = image::open(path2)?.into_rgba8();
+
+        Ok(img1 == img2)
+    }
 }
 
 /// Стандартное сравнение с предварительной проверкой размера и параллельным хэшированием
