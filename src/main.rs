@@ -102,18 +102,27 @@ fn main() {
     }
 
     let ssim_threshold = args.ssim;
+    // Определяем, нужно ли выполнять ресурсоемкое сравнение файлов.
+    // Сравнение пропускается, если нам нужны только добавленные файлы,
+    // и пользователь явно не запросил лог измененных файлов (-r).
+    let skip_comparison = args.only_added && !args.replace;
 
     // 3. Оптимизация: Параллельное сравнение файлов (нагружает все ядра процессора)
-    let modified: Vec<PathBuf> = candidate_modified
-        .into_par_iter()
-        .filter_map(|(rel_path, abs1, abs2)| {
-            if !compare::are_files_identical(&abs1, &abs2, ssim_threshold) {
-                Some(rel_path)
-            } else {
-                None
-            }
-        })
-        .collect();
+    let modified: Vec<PathBuf> = if skip_comparison {
+        // Мгновенно возвращаем пустой массив без обращений к диску
+        Vec::new()
+    } else {
+        candidate_modified
+            .into_par_iter()
+            .filter_map(|(rel_path, abs1, abs2)| {
+                if !compare::are_files_identical(&abs1, &abs2, ssim_threshold) {
+                    Some(rel_path)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
 
     // 4. Формируем список для параллельного копирования
     let mut files_to_copy = Vec::new();
@@ -173,9 +182,13 @@ fn main() {
     // Полная статистика (выводится всегда)
     println!("=== СТАТИСТИКА ===");
     println!("{}", format!("Добавлено: {}", added.len()).green().bold());
-    println!(
-        "{}",
-        format!("Изменено: {}", modified.len()).yellow().bold()
-    );
+    if skip_comparison {
+        println!("{}", "Изменено: [ПРОПУЩЕНО]".yellow().bold());
+    } else {
+        println!(
+            "{}",
+            format!("Изменено: {}", modified.len()).yellow().bold()
+        );
+    }
     println!("{}", format!("Удалено: {}", deleted.len()).red().bold());
 }
