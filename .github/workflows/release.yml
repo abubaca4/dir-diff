@@ -47,18 +47,20 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          Compress-Archive -Path dir-diff.exe -DestinationPath ${{ github.workspace }}/dir-diff-${{ matrix.target }}-${{ matrix.cpu }}.zip
+          7z a -mx=9 "${{ github.workspace }}/dir-diff-${{ matrix.target }}-${{ matrix.cpu }}.zip" dir-diff.exe
         shell: pwsh
 
       - name: Package (Linux)
         if: matrix.os == 'ubuntu-latest'
+        env:
+          XZ_OPT: "-9e"
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ${{ github.workspace }}/dir-diff-${{ matrix.target }}-${{ matrix.cpu }}.tar.gz dir-diff
+          tar cJf ${{ github.workspace }}/dir-diff-${{ matrix.target }}-${{ matrix.cpu }}.tar.xz dir-diff
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dir-diff-*-${{ matrix.cpu }}.zip
-            dir-diff-*-${{ matrix.cpu }}.tar.gz
+            dir-diff-*-${{ matrix.cpu }}.tar.xz
