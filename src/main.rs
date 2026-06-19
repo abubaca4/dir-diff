@@ -45,6 +45,14 @@ struct Args {
     /// Если не задан, требуется полное совпадение.
     #[arg(long = "ssim")]
     ssim: Option<f64>,
+
+    /// Копировать в результирующую папку ТОЛЬКО добавленные файлы
+    #[arg(long = "only-added", conflicts_with = "only_modified")]
+    only_added: bool,
+
+    /// Копировать в результирующую папку ТОЛЬКО изменённые файлы
+    #[arg(long = "only-modified", conflicts_with = "only_added")]
+    only_modified: bool,
 }
 
 /// Сканирует папку и возвращает HashMap, где ключ - относительный путь, значение - абсолютный.
@@ -109,11 +117,20 @@ fn main() {
 
     // 4. Формируем список для параллельного копирования
     let mut files_to_copy = Vec::new();
-    for rel_path in &added {
-        files_to_copy.push((rel_path, files2.get(rel_path).unwrap()));
+
+    // Если ни один из флагов не указан, копируем всё (стандартное поведение)
+    let copy_all = !args.only_added && !args.only_modified;
+
+    if copy_all || args.only_added {
+        for rel_path in &added {
+            files_to_copy.push((rel_path, files2.get(rel_path).unwrap()));
+        }
     }
-    for rel_path in &modified {
-        files_to_copy.push((rel_path, files2.get(rel_path).unwrap()));
+
+    if copy_all || args.only_modified {
+        for rel_path in &modified {
+            files_to_copy.push((rel_path, files2.get(rel_path).unwrap()));
+        }
     }
 
     // Параллельное копирование в Папку 3

@@ -1,6 +1,6 @@
 [package]
 name = "dir-diff"
-version = "0.3.1"
+version = "0.5.0"
 edition = "2024"
 
 [profile.release]
