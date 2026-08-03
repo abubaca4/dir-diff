@@ -5,11 +5,14 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 use clap::Parser;
 use colored::*;
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use pathdiff::diff_paths;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use walkdir::WalkDir;
 
 mod compare;
@@ -55,46 +58,74 @@ struct Args {
     only_modified: bool,
 }
 
-/// Сканирует папку и возвращает HashMap, где ключ - относительный путь, значение - абсолютный.
-fn scan_directory(dir: &Path) -> HashMap<PathBuf, PathBuf> {
+/// Сканирует папку, обновляет прогресс-бар и возвращает HashMap путей.
+fn scan_directory(dir: &Path, pb: ProgressBar) -> HashMap<PathBuf, PathBuf> {
     let mut files = HashMap::new();
+    let mut count = 0;
+
     // Обходим папку
     for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
             let abs_path = entry.path().to_path_buf();
+
+            // Оптимизация вывода: обновляем сообщение не каждый раз, чтобы не тратить CPU на строки
+            if count % 100 == 0 {
+                pb.set_message(abs_path.display().to_string());
+            }
+            count += 1;
+            pb.tick();
+
             // Вычисляем относительный путь для корректного сопоставления
             if let Some(rel_path) = diff_paths(&abs_path, dir) {
                 files.insert(rel_path, abs_path);
             }
         }
     }
+
+    pb.finish_with_message(format!("Завершено: {}", dir.display()));
     files
 }
 
 fn main() {
     let args = Args::parse();
 
-    // 1. Оптимизация: Параллельное сканирование двух папок
-    let (files1, files2) =
-        rayon::join(|| scan_directory(&args.dir1), || scan_directory(&args.dir2));
+    // =========================================================================
+    // ФАЗА 1: Построение дерева
+    // =========================================================================
+    println!(
+        "{}",
+        "\n[1/3] Построение дерева директорий...".cyan().bold()
+    );
+
+    let m = MultiProgress::new();
+    let spinner_style = ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}")
+        .unwrap()
+        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ");
+
+    let pb1 = m.add(ProgressBar::new_spinner());
+    pb1.set_style(spinner_style.clone());
+    let pb2 = m.add(ProgressBar::new_spinner());
+    pb2.set_style(spinner_style);
+
+    // Параллельное сканирование двух папок с передачей спиннеров
+    let (files1, files2) = rayon::join(
+        || scan_directory(&args.dir1, pb1),
+        || scan_directory(&args.dir2, pb2),
+    );
 
     let mut added = Vec::new();
     let mut deleted = Vec::new();
     let mut candidate_modified = Vec::new();
 
-    // 2. Разделение файлов на категории
-    // Проверяем файлы из Папки 2 (добавленные или изменённые)
+    // Разделение файлов на категории
     for (rel_path, abs2) in &files2 {
         if let Some(abs1) = files1.get(rel_path) {
-            // Файл есть в обеих папках, нужен анализ
             candidate_modified.push((rel_path.clone(), abs1.clone(), abs2.clone()));
         } else {
-            // Файла не было в Папке 1
             added.push(rel_path.clone());
         }
     }
 
-    // Проверяем файлы из Папки 1 (удалённые)
     for rel_path in files1.keys() {
         if !files2.contains_key(rel_path) {
             deleted.push(rel_path.clone());
@@ -102,59 +133,121 @@ fn main() {
     }
 
     let ssim_threshold = args.ssim;
-    // Определяем, нужно ли выполнять ресурсоемкое сравнение файлов.
-    // Сравнение пропускается, если нам нужны только добавленные файлы,
-    // и пользователь явно не запросил лог измененных файлов (-r).
     let skip_comparison = args.only_added && !args.replace;
 
-    // 3. Оптимизация: Параллельное сравнение файлов (нагружает все ядра процессора)
+    // =========================================================================
+    // ФАЗА 2: Сравнение файлов
+    // =========================================================================
+    println!("{}", "\n[2/3] Сравнение файлов...".cyan().bold());
+
     let modified: Vec<PathBuf> = if skip_comparison {
-        // Мгновенно возвращаем пустой массив без обращений к диску
+        println!("{}", "Пропущено (выбран режим только добавленных)".dimmed());
         Vec::new()
     } else {
-        candidate_modified
+        let total_candidates = candidate_modified.len() as u64;
+        let pb_compare = ProgressBar::new(total_candidates);
+        pb_compare.set_style(
+            ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} файлов ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+
+        let res = candidate_modified
             .into_par_iter()
             .filter_map(|(rel_path, abs1, abs2)| {
-                if !compare::are_files_identical(&abs1, &abs2, ssim_threshold) {
-                    Some(rel_path)
-                } else {
-                    None
-                }
+                let is_identical = compare::are_files_identical(&abs1, &abs2, ssim_threshold);
+                // Безопасный инкремент из любого потока
+                pb_compare.inc(1);
+
+                if !is_identical { Some(rel_path) } else { None }
             })
-            .collect()
+            .collect();
+
+        pb_compare.finish_with_message("Сравнение завершено");
+        res
     };
 
-    // 4. Формируем список для параллельного копирования
-    let mut files_to_copy = Vec::new();
+    // =========================================================================
+    // ФАЗА 3: Процесс копирования
+    // =========================================================================
+    println!("{}", "\n[3/3] Подготовка к копированию...".cyan().bold());
 
-    // Если ни один из флагов не указан, копируем всё (стандартное поведение)
+    let mut raw_files_to_copy = Vec::new();
     let copy_all = !args.only_added && !args.only_modified;
 
     if copy_all || args.only_added {
         for rel_path in &added {
-            files_to_copy.push((rel_path, files2.get(rel_path).unwrap()));
+            raw_files_to_copy.push((rel_path, files2.get(rel_path).unwrap()));
         }
     }
-
     if copy_all || args.only_modified {
         for rel_path in &modified {
-            files_to_copy.push((rel_path, files2.get(rel_path).unwrap()));
+            raw_files_to_copy.push((rel_path, files2.get(rel_path).unwrap()));
         }
     }
 
-    // Параллельное копирование в Папку 3
-    files_to_copy
-        .into_par_iter()
-        .for_each(|(rel_path, abs_src)| {
-            let dest_path = args.dir3.join(rel_path);
+    if raw_files_to_copy.is_empty() {
+        println!("{}", "Нет файлов для копирования.".yellow());
+    } else {
+        // Оптимизация: Параллельно собираем размеры файлов ДО начала копирования,
+        // чтобы получить точный общий вес и не дергать метадату повторно внутри самого копирования.
+        let files_to_copy: Vec<(&PathBuf, &PathBuf, u64)> = raw_files_to_copy
+            .into_par_iter()
+            .map(|(rel, abs)| {
+                let size = fs::metadata(abs).map(|m| m.len()).unwrap_or(0);
+                (rel, abs, size)
+            })
+            .collect();
 
-            if let Some(parent) = dest_path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            let _ = fs::copy(abs_src, dest_path);
-        });
+        let total_bytes: u64 = files_to_copy.iter().map(|(_, _, size)| size).sum();
+        let total_files = files_to_copy.len() as u64;
 
-    // 5. Вывод результатов в консоль
+        let pb_copy = ProgressBar::new(total_files);
+        pb_copy.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.yellow/red}] {pos}/{len} файлов | Объем: {msg} ({eta})"
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+
+        // Форматируем начальное сообщение для нулей
+        pb_copy.set_message(format!("0 B / {}", HumanBytes(total_bytes)));
+
+        let copied_bytes = Arc::new(AtomicU64::new(0));
+
+        files_to_copy
+            .into_par_iter()
+            .for_each(|(rel_path, abs_src, file_size)| {
+                let dest_path = args.dir3.join(rel_path);
+
+                if let Some(parent) = dest_path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+
+                if fs::copy(abs_src, dest_path).is_ok() {
+                    // Атомарно обновляем счетчик скопированных байт
+                    let current_bytes =
+                        copied_bytes.fetch_add(file_size, Ordering::Relaxed) + file_size;
+
+                    // Обновляем текст с объемом
+                    pb_copy.set_message(format!(
+                        "{} / {}",
+                        HumanBytes(current_bytes),
+                        HumanBytes(total_bytes)
+                    ));
+                }
+                pb_copy.inc(1);
+            });
+
+        pb_copy.finish_with_message(format!("Скопировано: {}", HumanBytes(total_bytes)));
+    }
+
+    // =========================================================================
+    // ВЫВОД РЕЗУЛЬТАТОВ (Без изменений)
+    // =========================================================================
+    println!();
+
     if args.add && !added.is_empty() {
         println!("{}", "--- ДОБАВЛЕННЫЕ ФАЙЛЫ ---".green().bold());
         for f in &added {
@@ -179,7 +272,6 @@ fn main() {
         println!();
     }
 
-    // Полная статистика (выводится всегда)
     println!("=== СТАТИСТИКА ===");
     println!("{}", format!("Добавлено: {}", added.len()).green().bold());
     if skip_comparison {
